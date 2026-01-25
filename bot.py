@@ -35,10 +35,31 @@ USER_CHAT_ID = None
 
 def format_translation_response(english: str, result: dict) -> str:
     """Format a translation result for Telegram."""
-    response = f"🇷🇴 {result['romanian']}\n\n"
+    # Header with original English
+    response = f'"{english}"\n'
+    response += f"↓\n"
+    response += f"🇷🇴 {result['romanian']}\n"
     response += f"📖 {result['phonetic']}\n\n"
-    if result['notes']:
-        response += f"💬 {result['notes']}"
+
+    # Word breakdown
+    if result.get('breakdown'):
+        response += "📝 BREAKDOWN\n"
+        for item in result['breakdown']:
+            response += f"• {item['word']} = {item['meaning']}\n"
+        response += "\n"
+
+    # Pattern with examples
+    if result.get('pattern'):
+        response += f"🔄 PATTERN: {result['pattern']}\n"
+        for ex in result.get('pattern_examples', []):
+            response += f"• {ex}\n"
+        response += "\n"
+
+    # Formality tag
+    formality = result.get('formality', 'neutral')
+    formality_icons = {'casual': '🎭 Casual', 'formal': '👔 Formal', 'neutral': '➖ Neutral'}
+    response += formality_icons.get(formality, '➖ Neutral')
+
     return response
 
 
@@ -160,8 +181,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Treat as translation request
         result = translate(text)
 
+        # Build notes from breakdown and pattern for storage
+        notes_parts = []
+        if result.get('breakdown'):
+            breakdown_str = ", ".join([f"{b['word']}={b['meaning']}" for b in result['breakdown']])
+            notes_parts.append(f"Breakdown: {breakdown_str}")
+        if result.get('pattern'):
+            notes_parts.append(f"Pattern: {result['pattern']}")
+        if result.get('formality'):
+            notes_parts.append(f"Formality: {result['formality']}")
+        notes = " | ".join(notes_parts) if notes_parts else ""
+
         # Save to database
-        save_translation(text, result['romanian'], result['phonetic'], result['notes'])
+        save_translation(text, result['romanian'], result['phonetic'], notes)
 
         # Format and send response
         response = format_translation_response(text, result)
