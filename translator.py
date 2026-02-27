@@ -1,9 +1,40 @@
 """Claude API integration for translations and language help."""
 
+import json
+import logging
+import os
+import time
+
 import anthropic
 from config import ANTHROPIC_API_KEY
 
+logger = logging.getLogger(__name__)
+
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+
+# Exceptions we retry (transient / rate limit / server overload)
+RETRYABLE_EXCEPTIONS = tuple(
+    e for e in (
+        getattr(anthropic, "RateLimitError", None),
+        getattr(anthropic, "InternalServerError", None),
+        getattr(anthropic, "APIConnectionError", None),
+        getattr(anthropic, "APITimeoutError", None),
+        getattr(anthropic, "ServiceUnavailableError", None),
+        getattr(anthropic, "OverloadedError", None),
+        getattr(anthropic, "DeadlineExceededError", None),
+    ) if e is not None
+)
+
+
+class TranslationServiceError(Exception):
+    """Raised when the translation/LLM service is temporarily unavailable after retries."""
+
+    USER_MESSAGE = "Translation service is temporarily unavailable. Please try again in a moment."
+
+
+# Use a stable model ID; override with ANTHROPIC_MODEL env if needed
+def _get_model() -> str:
+    return os.environ.get("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
 
 TRANSLATION_SYSTEM_PROMPT = """You are a Romanian language tutor helping someone learn colloquial, everyday Romanian.
 
@@ -66,21 +97,61 @@ Pattern: [description]
 Keep it scannable. No fluff. This is a study reference, not a pep talk."""
 
 
+def _get_response_text(message) -> str:
+    """Extract text from Anthropic message content; raise if empty or non-text."""
+    if not message.content or len(message.content) == 0:
+        raise ValueError("Anthropic API returned empty content")
+    block = message.content[0]
+    if getattr(block, "type", None) != "text" or not getattr(block, "text", None):
+        raise ValueError(f"Unexpected content block type: {getattr(block, 'type', type(block).__name__)}")
+    return block.text
+
+
+def _is_retryable(e: BaseException) -> bool:
+    if RETRYABLE_EXCEPTIONS and isinstance(e, RETRYABLE_EXCEPTIONS):
+        return True
+    # Fallback for older SDK: retry on 429, 5xx
+    if hasattr(e, "response") and getattr(e.response, "status_code", None) is not None:
+        return e.response.status_code in (429, 500, 502, 503, 504, 529)
+    return False
+
+
+def _call_api_with_retry(create_message, max_retries: int = 3):
+    """Call Anthropic API with exponential backoff on transient errors."""
+    last_error = None
+    for attempt in range(max_retries):
+        try:
+            return create_message()
+        except BaseException as e:
+            if _is_retryable(e):
+                last_error = e
+                retry_after = None
+                if hasattr(e, "response") and getattr(e.response, "headers", None):
+                    retry_after = e.response.headers.get("retry-after")
+                delay = int(retry_after) if retry_after else min(2 ** attempt, 30)
+                logger.warning("Anthropic API transient error (attempt %s/%s), retrying in %ss: %s", attempt + 1, max_retries, delay, e)
+                time.sleep(delay)
+            else:
+                raise
+    raise TranslationServiceError(TranslationServiceError.USER_MESSAGE) from last_error
+
+
 def translate(english_text: str) -> dict:
     """Translate English text to Romanian with phonetics and notes."""
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1024,
-        system=TRANSLATION_SYSTEM_PROMPT,
-        messages=[
-            {"role": "user", "content": f"Translate to Romanian: {english_text}"}
-        ]
-    )
+    def _create():
+        return client.messages.create(
+            model=_get_model(),
+            max_tokens=1024,
+            system=TRANSLATION_SYSTEM_PROMPT,
+            messages=[
+                {"role": "user", "content": f"Translate to Romanian: {english_text}"}
+            ]
+        )
 
-    response_text = message.content[0].text
+    message = _call_api_with_retry(_create)
+    response_text = _get_response_text(message)
 
     # Parse the JSON response
-    import json
     try:
         # Handle potential markdown code blocks
         if "```json" in response_text:
@@ -111,16 +182,18 @@ def translate(english_text: str) -> dict:
 
 def answer_question(question: str) -> str:
     """Answer a question about Romanian language."""
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=1024,
-        system=QUESTION_SYSTEM_PROMPT,
-        messages=[
-            {"role": "user", "content": question}
-        ]
-    )
+    def _create():
+        return client.messages.create(
+            model=_get_model(),
+            max_tokens=1024,
+            system=QUESTION_SYSTEM_PROMPT,
+            messages=[
+                {"role": "user", "content": question}
+            ]
+        )
 
-    return message.content[0].text
+    message = _call_api_with_retry(_create)
+    return _get_response_text(message)
 
 
 def generate_weekly_report(translations: list[dict]) -> str:
@@ -134,13 +207,15 @@ def generate_weekly_report(translations: list[dict]) -> str:
         for t in translations
     ])
 
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=2048,
-        system=WEEKLY_REPORT_SYSTEM_PROMPT,
-        messages=[
-            {"role": "user", "content": f"Create a weekly review for these {len(translations)} translations:\n\n{translation_list}"}
-        ]
-    )
+    def _create():
+        return client.messages.create(
+            model=_get_model(),
+            max_tokens=2048,
+            system=WEEKLY_REPORT_SYSTEM_PROMPT,
+            messages=[
+                {"role": "user", "content": f"Create a weekly review for these {len(translations)} translations:\n\n{translation_list}"}
+            ]
+        )
 
-    return message.content[0].text
+    message = _call_api_with_retry(_create)
+    return _get_response_text(message)

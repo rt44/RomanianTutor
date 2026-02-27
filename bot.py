@@ -19,7 +19,7 @@ from database import (
     search_translations,
     get_stats,
 )
-from translator import translate, answer_question
+from translator import translate, answer_question, TranslationServiceError
 from scheduler import create_scheduler, set_bot_app, trigger_weekly_report_now
 
 # Set up logging
@@ -202,11 +202,16 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle errors."""
-    logger.error(f"Error: {context.error}")
+    err = context.error
+    logger.exception("Unhandled error in bot: %s", err)
+
     if update and update.message:
-        await update.message.reply_text(
-            "Sorry, something went wrong. Please try again."
-        )
+        if isinstance(err, TranslationServiceError):
+            await update.message.reply_text(TranslationServiceError.USER_MESSAGE)
+        else:
+            await update.message.reply_text(
+                "Sorry, something went wrong. Please try again."
+            )
 
 
 def main():
