@@ -3,14 +3,22 @@
 import os
 from pathlib import Path
 
+# Load .env file if present (for local dev)
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
+
 # Load from environment variables
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN")
 ANTHROPIC_API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 TIMEZONE = os.environ.get("TIMEZONE", "America/Chicago")
 
 # Database path - use persistent storage on Railway if available
-DATA_DIR = Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "."))
-DATABASE_PATH = DATA_DIR / "romanian_bot.db"
+# On Railway: set RAILWAY_VOLUME_MOUNT_PATH to a volume path for persistence
+_data_dir = Path(os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "."))
+DATABASE_PATH = _data_dir / "romanian_bot.db"
 
 # Weekly report schedule (Friday at 8am)
 WEEKLY_REPORT_DAY = "fri"

@@ -25,6 +25,13 @@ RETRYABLE_EXCEPTIONS = tuple(
     ) if e is not None
 )
 
+# Model fallback chain: if primary fails (e.g. deprecated), try next
+MODEL_FALLBACKS = [
+    "claude-opus-4-6",
+    "claude-opus-4-5-20251101",
+    "claude-3-5-sonnet-latest",
+]
+
 
 class TranslationServiceError(Exception):
     """Raised when the translation/LLM service is temporarily unavailable after retries."""
@@ -32,9 +39,17 @@ class TranslationServiceError(Exception):
     USER_MESSAGE = "Translation service is temporarily unavailable. Please try again in a moment."
 
 
-# Use a stable model ID; override with ANTHROPIC_MODEL env if needed
 def _get_model() -> str:
-    return os.environ.get("ANTHROPIC_MODEL", "claude-3-5-sonnet-latest")
+    """Primary model; override with ANTHROPIC_MODEL env."""
+    return os.environ.get("ANTHROPIC_MODEL") or MODEL_FALLBACKS[0]
+
+
+def _get_models_to_try() -> list[str]:
+    """Ordered list of models to try (env override first, then fallbacks)."""
+    override = os.environ.get("ANTHROPIC_MODEL")
+    if override:
+        return [override] + [m for m in MODEL_FALLBACKS if m != override]
+    return MODEL_FALLBACKS.copy()
 
 TRANSLATION_SYSTEM_PROMPT = """You are a Romanian language tutor helping someone learn colloquial, everyday Romanian.
 
@@ -116,6 +131,17 @@ def _is_retryable(e: BaseException) -> bool:
     return False
 
 
+def _is_model_not_found(e: BaseException) -> bool:
+    """True if error indicates model not found / deprecated."""
+    if getattr(anthropic, "NotFoundError", None) and isinstance(e, anthropic.NotFoundError):
+        return True
+    code = getattr(getattr(e, "response", None), "status_code", None)
+    if code == 404:
+        return True
+    msg = str(e).lower()
+    return "not found" in msg or ("model" in msg and "invalid" in msg)
+
+
 def _call_api_with_retry(create_message, max_retries: int = 3):
     """Call Anthropic API with exponential backoff on transient errors."""
     last_error = None
@@ -136,11 +162,27 @@ def _call_api_with_retry(create_message, max_retries: int = 3):
     raise TranslationServiceError(TranslationServiceError.USER_MESSAGE) from last_error
 
 
+def _call_with_model_fallback(create_message_factory):
+    """Try each model in fallback chain; raise only after all fail."""
+    models = _get_models_to_try()
+    last_error = None
+    for model in models:
+        try:
+            return _call_api_with_retry(lambda: create_message_factory(model))
+        except BaseException as e:
+            if _is_model_not_found(e):
+                logger.warning("Model %s failed (%s), trying fallback...", model, e)
+                last_error = e
+            else:
+                raise
+    raise TranslationServiceError(TranslationServiceError.USER_MESSAGE) from last_error
+
+
 def translate(english_text: str) -> dict:
     """Translate English text to Romanian with phonetics and notes."""
-    def _create():
+    def create(model):
         return client.messages.create(
-            model=_get_model(),
+            model=model,
             max_tokens=1024,
             system=TRANSLATION_SYSTEM_PROMPT,
             messages=[
@@ -148,7 +190,7 @@ def translate(english_text: str) -> dict:
             ]
         )
 
-    message = _call_api_with_retry(_create)
+    message = _call_with_model_fallback(create)
     response_text = _get_response_text(message)
 
     # Parse the JSON response
@@ -182,9 +224,9 @@ def translate(english_text: str) -> dict:
 
 def answer_question(question: str) -> str:
     """Answer a question about Romanian language."""
-    def _create():
+    def create(model):
         return client.messages.create(
-            model=_get_model(),
+            model=model,
             max_tokens=1024,
             system=QUESTION_SYSTEM_PROMPT,
             messages=[
@@ -192,7 +234,7 @@ def answer_question(question: str) -> str:
             ]
         )
 
-    message = _call_api_with_retry(_create)
+    message = _call_with_model_fallback(create)
     return _get_response_text(message)
 
 
@@ -207,9 +249,9 @@ def generate_weekly_report(translations: list[dict]) -> str:
         for t in translations
     ])
 
-    def _create():
+    def create(model):
         return client.messages.create(
-            model=_get_model(),
+            model=model,
             max_tokens=2048,
             system=WEEKLY_REPORT_SYSTEM_PROMPT,
             messages=[
@@ -217,5 +259,5 @@ def generate_weekly_report(translations: list[dict]) -> str:
             ]
         )
 
-    message = _call_api_with_retry(_create)
+    message = _call_with_model_fallback(create)
     return _get_response_text(message)

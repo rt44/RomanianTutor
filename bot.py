@@ -1,5 +1,6 @@
 """Main Telegram bot logic and handlers."""
 
+import asyncio
 import logging
 from telegram import Update
 from telegram.ext import (
@@ -20,7 +21,7 @@ from database import (
     get_stats,
 )
 from translator import translate, answer_question, TranslationServiceError
-from scheduler import create_scheduler, set_bot_app, trigger_weekly_report_now
+from scheduler import set_chat_id, send_weekly_report, trigger_weekly_report_now
 
 # Set up logging
 logging.basicConfig(
@@ -67,7 +68,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /start command."""
     global USER_CHAT_ID
     USER_CHAT_ID = update.effective_chat.id
-    set_bot_app(context.application, USER_CHAT_ID)
+    set_chat_id(USER_CHAT_ID)
 
     await update.message.reply_text(
         "Bună! I'm your Romanian learning companion.\n\n"
@@ -154,32 +155,34 @@ async def weekly(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /weekly command - manually trigger weekly report."""
     global USER_CHAT_ID
     USER_CHAT_ID = update.effective_chat.id
-    set_bot_app(context.application, USER_CHAT_ID)
+    set_chat_id(USER_CHAT_ID)
 
     await update.message.reply_text("Generating your weekly report...")
-    await trigger_weekly_report_now()
+    await trigger_weekly_report_now(context)
 
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle regular text messages - translate or answer questions."""
     global USER_CHAT_ID
     USER_CHAT_ID = update.effective_chat.id
-    set_bot_app(context.application, USER_CHAT_ID)
+    set_chat_id(USER_CHAT_ID)
 
     text = update.message.text.strip()
 
-    # Check if it looks like a question about Romanian
-    question_indicators = ["?", "how do", "what is", "what's", "why", "when do", "can you explain"]
+    # Check if it looks like a question about Romanian or language
+    question_indicators = ["?", "how do", "what is", "what's", "what does", "why", "when do", "can you explain"]
+    topic_words = ["romanian", "grammar", "word", "phrase", "say", "pronounce", "mean"]
     is_question = any(indicator in text.lower() for indicator in question_indicators)
+    has_topic = any(word in text.lower() for word in topic_words)
 
-    if is_question and any(word in text.lower() for word in ["romanian", "grammar", "word", "phrase", "say", "pronounce"]):
-        # Answer as a language question
-        response = answer_question(text)
+    if is_question and has_topic:
+        # Answer as a language question (run in thread to avoid blocking event loop)
+        response = await asyncio.to_thread(answer_question, text)
         save_conversation(text, response, "question")
         await update.message.reply_text(response)
     else:
-        # Treat as translation request
-        result = translate(text)
+        # Treat as translation request (run in thread to avoid blocking event loop)
+        result = await asyncio.to_thread(translate, text)
 
         # Build notes from breakdown and pattern for storage
         notes_parts = []
@@ -201,21 +204,28 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Handle errors."""
-    err = context.error
-    logger.exception("Unhandled error in bot: %s", err)
+    """Handle errors. Never raises - bot must keep running."""
+    try:
+        err = context.error
+        logger.exception("Unhandled error in bot: %s", err)
 
-    if update and update.message:
-        if isinstance(err, TranslationServiceError):
-            await update.message.reply_text(TranslationServiceError.USER_MESSAGE)
-        else:
-            await update.message.reply_text(
-                "Sorry, something went wrong. Please try again."
-            )
+        if update and update.message:
+            if isinstance(err, TranslationServiceError):
+                await update.message.reply_text(TranslationServiceError.USER_MESSAGE)
+            else:
+                await update.message.reply_text(
+                    "Sorry, something went wrong. Please try again."
+                )
+    except Exception as e:
+        logger.exception("Error handler itself failed: %s", e)
 
 
 def main():
     """Start the bot."""
+    from datetime import time as dt_time
+    import pytz
+    from config import TIMEZONE, WEEKLY_REPORT_DAY, WEEKLY_REPORT_HOUR, WEEKLY_REPORT_MINUTE
+
     # Validate configuration
     validate_config()
 
@@ -223,7 +233,7 @@ def main():
     init_db()
     logger.info("Database initialized")
 
-    # Create application
+    # Create application (JobQueue runs in same event loop as bot - no scheduler conflicts)
     app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
 
     # Add handlers
@@ -238,10 +248,19 @@ def main():
     # Add error handler
     app.add_error_handler(error_handler)
 
-    # Create and start scheduler
-    scheduler = create_scheduler()
-    scheduler.start()
-    logger.info("Scheduler started")
+    # Schedule weekly report: Friday 8am (Python weekday: Mon=0, Fri=4)
+    if app.job_queue:
+        day_map = {"mon": 0, "tue": 1, "wed": 2, "thu": 3, "fri": 4, "sat": 5, "sun": 6}
+        tz = pytz.timezone(TIMEZONE)
+        report_time = dt_time(WEEKLY_REPORT_HOUR, WEEKLY_REPORT_MINUTE, tzinfo=tz)
+        app.job_queue.run_daily(
+            send_weekly_report,
+            time=report_time,
+            days=(day_map.get(WEEKLY_REPORT_DAY.lower(), 4),),
+        )
+        logger.info("Weekly report scheduled (Fri 8am)")
+    else:
+        logger.warning("JobQueue not available - install python-telegram-bot[job-queue], weekly reports disabled")
 
     # Start the bot
     logger.info("Starting bot...")
