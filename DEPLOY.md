@@ -45,6 +45,7 @@ railway up
 | "Translation service temporarily unavailable" | Anthropic API rate limit or outage. Bot retries 3× with backoff. Wait and try again. |
 | Weekly report never arrives | User must send `/start` or `/weekly` at least once so the bot knows where to send. Reports run Friday 8am (your `TIMEZONE`). |
 | Deploy doesn’t update | If using GitHub Actions: ensure `RAILWAY_TOKEN` and `RAILWAY_SERVICE_ID` are set. Otherwise run `railway up` manually. |
+| No response at all | Bot deletes webhook on startup (webhook blocks polling). Try `/ping` – if you get "Pong!", the bot is running. |
 
 ## Resilience (why it shouldn't stop)
 
