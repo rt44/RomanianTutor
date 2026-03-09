@@ -75,6 +75,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Send me any English text and I'll translate it to colloquial Romanian "
         "with pronunciation guide.\n\n"
         "Commands:\n"
+        "/ping - Check if bot is running\n"
         "/history - Last 20 translations\n"
         "/search <word> - Search past translations\n"
         "/stats - Your learning stats\n"
@@ -83,12 +84,17 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
+async def ping(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Quick liveness check - if you get a reply, the bot is running."""
+    await update.message.reply_text("Pong! Bot is running.")
+
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Handle /help command."""
     await update.message.reply_text(
         "How to use this bot:\n\n"
         "📝 Send any English text → Get Romanian translation with phonetics\n\n"
         "Commands:\n"
+        "/ping - Check if bot is running\n"
         "/history - See your last 20 translations\n"
         "/search <word> - Search all past translations\n"
         "/stats - View your learning statistics\n"
@@ -233,11 +239,17 @@ def main():
     init_db()
     logger.info("Database initialized")
 
+    # Delete webhook so polling receives updates (webhook + polling are mutually exclusive)
+    async def clear_webhook(application):
+        await application.bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Webhook cleared - bot will receive updates via polling")
+
     # Create application (JobQueue runs in same event loop as bot - no scheduler conflicts)
-    app = Application.builder().token(TELEGRAM_BOT_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_BOT_TOKEN).post_init(clear_webhook).build()
 
     # Add handlers
     app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("ping", ping))
     app.add_handler(CommandHandler("help", help_command))
     app.add_handler(CommandHandler("history", history))
     app.add_handler(CommandHandler("search", search))
